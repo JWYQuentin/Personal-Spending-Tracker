@@ -17,7 +17,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 
 # 2. Install dependencies
-pip install openai python-dotenv requests streamlit pandas
+pip install openai python-dotenv requests streamlit pandas openpyxl
 
 # 3. Create a .env file with your credentials (this file is gitignored)
 cat > .env <<'EOF'
@@ -36,6 +36,7 @@ python categorize.py    # Assign a category to every uncategorized transaction
 python agent.py         # Chat REPL — ask questions about your spending
 python agent.py "how much did I spend on dining last month?"   # one-shot question
 
+python export_excel.py       # Write transactions + summaries to spending.xlsx
 streamlit run dashboard.py   # Open the spending dashboard in your browser
 ```
 
@@ -58,6 +59,10 @@ A typical session is just sync → categorize → explore.
 - **`dashboard.py`** — A read-only Streamlit dashboard: summary totals (spent /
   income / net), spending by category, spending over time, top transactions, and
   account balances, all filterable by time range.
+- **`export_excel.py`** — A read-only export that regenerates `spending.xlsx` from
+  the database: one tab of all transactions (with payment method), one of spending
+  by category, and one of account balances. Runs automatically before the agent via
+  the `track` launcher.
 
 ## Data
 

@@ -1,4 +1,5 @@
 # Launch with: streamlit run dashboard.py
+import re
 import sqlite3
 from datetime import date, timedelta
 
@@ -14,6 +15,10 @@ NON_SPENDING = ("cc_payment", "internal_transfer", "investment", "income", "tran
 # Maps the range selector to an inclusive lower-bound date (YYYY-MM-DD) or None for "All".
 def _start_date(range_label):
     today = date.today()
+    if range_label == "1 week":
+        return (today - timedelta(days=7)).isoformat()
+    if range_label == "2 weeks":
+        return (today - timedelta(days=14)).isoformat()
     if range_label == "30 days":
         return (today - timedelta(days=30)).isoformat()
     if range_label == "90 days":
@@ -29,7 +34,7 @@ def _connect():
 
 @st.cache_data
 def summary(range_label):
-    """Returns (spent_positive, income, net)."""
+    """Returns total spending for the period as a positive dollar amount."""
     start = _start_date(range_label)
     placeholders = ",".join("?" * len(NON_SPENDING))
     date_clause = "AND date(posted, 'unixepoch') >= ?" if start else ""
@@ -42,19 +47,10 @@ def summary(range_label):
                 WHERE amount < 0 AND my_category NOT IN ({placeholders}) {date_clause}""",
             spent_params,
         ).fetchone()[0]
-
-        income_params = ([start] if start else [])
-        income = conn.execute(
-            f"""SELECT COALESCE(SUM(amount), 0) FROM transactions
-                WHERE my_category = 'income' AND amount > 0 {date_clause}""",
-            income_params,
-        ).fetchone()[0]
     finally:
         conn.close()
 
-    spent_positive = -spent  # spending is stored negative
-    net = income - spent_positive
-    return spent_positive, income, net
+    return -spent  # spending is stored negative; present as positive
 
 
 @st.cache_data
@@ -126,17 +122,21 @@ def top_transactions(range_label):
     conn = _connect()
     try:
         rows = conn.execute(
-            f"""SELECT date(posted, 'unixepoch') AS date,
-                       amount, description, my_category AS category
-                FROM transactions
-                WHERE amount < 0 AND my_category NOT IN ({placeholders}) {date_clause}
-                ORDER BY amount ASC
+            f"""SELECT date(t.posted, 'unixepoch') AS date,
+                       t.amount, t.description, t.my_category AS category,
+                       a.org, a.name AS account_name
+                FROM transactions t
+                LEFT JOIN accounts a ON a.id = t.account_id
+                WHERE t.amount < 0 AND t.my_category NOT IN ({placeholders}) {date_clause}
+                ORDER BY t.amount ASC
                 LIMIT 10""",
             params,
         ).fetchall()
     finally:
         conn.close()
-    return pd.DataFrame(rows, columns=["date", "amount", "description", "category"])
+    df = pd.DataFrame(rows, columns=["date", "amount", "description", "category", "org", "account_name"])
+    df["method"] = df.apply(lambda r: _payment_method(r["org"], r["account_name"]), axis=1)
+    return df
 
 
 @st.cache_data
@@ -158,6 +158,18 @@ def accounts():
 
 def _money(x):
     return f"${x:,.2f}"
+
+
+def _payment_method(org, account_name):
+    """Readable payment-method label: account name with the trailing '(1234)' stripped,
+    prefixed with 'BofA' for Bank of America so generic names aren't ambiguous."""
+    if not account_name:
+        return ""
+    label = re.sub(r"\s*\(\d+\)\s*$", "", account_name)        # drop trailing "(1234)"
+    label = re.sub(r"\s*-\s*\d+\s*$", "", label).strip()       # drop trailing "- 1234"
+    if org and "bank of america" in org.lower() and not label.lower().startswith("bofa"):
+        label = f"BofA {label}"
+    return label
 
 
 def _empty(msg="No data for this period."):
@@ -191,26 +203,17 @@ st.markdown("<h1 style='font-weight:700;margin-bottom:0.5rem'>Spending</h1>", un
 
 range_label = st.radio(
     "time range",
-    ["30 days", "90 days", "Year to date", "All"],
-    index=0,
+    ["1 week", "2 weeks", "30 days", "90 days", "Year to date", "All"],
+    index=2,
     horizontal=True,
     label_visibility="collapsed",
 )
 
 st.markdown("<hr>", unsafe_allow_html=True)
 
-# --- summary row
-spent, income, net = summary(range_label)
-c1, c2, c3 = st.columns(3)
-c1.metric("spent", _money(spent))
-c2.metric("income", _money(income))
-net_color = "#1a7f37" if net >= 0 else "#c1121f"
-with c3:
-    st.markdown(
-        f"<div style='font-size:0.8rem;color:#555'>net</div>"
-        f"<div style='font-size:2rem;font-weight:500;color:{net_color}'>{_money(net)}</div>",
-        unsafe_allow_html=True,
-    )
+# --- summary
+spent = summary(range_label)
+st.metric("spent", _money(spent))
 
 st.markdown("<hr>", unsafe_allow_html=True)
 
@@ -274,12 +277,34 @@ top = top_transactions(range_label)
 if top.empty:
     _empty()
 else:
-    disp = top.copy()
-    disp["Amount"] = disp["amount"].map(lambda a: _money(-a))  # show as positive
-    disp["Description"] = disp["description"].fillna("").map(lambda d: d[:50])
-    disp = disp.rename(columns={"date": "Date", "category": "Category"})
-    disp = disp[["Date", "Amount", "Description", "Category"]]
-    st.dataframe(disp, hide_index=True, width='stretch')
+    header = (
+        "<tr>"
+        "<th style='text-align:left;padding:4px 8px 4px 0'>Date</th>"
+        "<th style='text-align:right;padding:4px 8px'>Amount</th>"
+        "<th style='text-align:left;padding:4px 8px'>Description</th>"
+        "<th style='text-align:left;padding:4px 0 4px 8px'>Category</th>"
+        "</tr>"
+    )
+    body = []
+    for _, r in top.iterrows():
+        desc = (r["description"] or "")[:50]
+        method = r["method"]
+        method_line = (
+            f"<div style='color:#999;font-size:0.78rem'>{method}</div>" if method else ""
+        )
+        body.append(
+            "<tr>"
+            f"<td style='padding:6px 8px 6px 0;vertical-align:top'>{r['date']}</td>"
+            f"<td style='padding:6px 8px;text-align:right;vertical-align:top'>{_money(-r['amount'])}</td>"
+            f"<td style='padding:6px 8px'>{desc}{method_line}</td>"
+            f"<td style='padding:6px 0 6px 8px;vertical-align:top'>{r['category']}</td>"
+            "</tr>"
+        )
+    st.markdown(
+        "<table style='width:100%;border-collapse:collapse'>"
+        + header + "".join(body) + "</table>",
+        unsafe_allow_html=True,
+    )
 
 st.markdown("<hr>", unsafe_allow_html=True)
 

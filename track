@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Launch the spending tracker: sync fresh data, categorize it, then open the agent.
+# Usage: ./track                       # interactive REPL
+#        ./track "how much on dining?"  # one-shot question
+cd "$(dirname "$0")" || exit 1
+./.venv/bin/python sync.py && ./.venv/bin/python categorize.py && ./.venv/bin/python export_excel.py && ./.venv/bin/python agent.py "$@"
